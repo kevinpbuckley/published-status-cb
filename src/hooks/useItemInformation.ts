@@ -1,15 +1,19 @@
 // hooks/useItemInformation.ts
 import { useState, useEffect, useCallback } from 'react';
 import { useMarketplaceClient } from '../utils/hooks/useMarketplaceClient';
-import { getItemsFromAuthoring, getItemsFromLive } from '../utils/graphqlQueries';
 import { 
-  extractItemIds, 
+  getItemsFromAuthoring, 
+  getItemsFromLive, 
+  resolveLocalDatasourcePaths 
+} from '../utils/graphqlQueries';
+import { 
+  extractItemIdsWithLocalPaths,
   processItemData, 
-  createItemInformationResponse 
+  createItemInformationResponse
 } from '../utils/dataProcessing';
 import type { 
   ItemInformationResponse, 
-  ProcessedItemInfo 
+  ProcessedItemInfo
 } from '../types/itemInformation';
 
 export interface UseItemInformationResult {
@@ -25,6 +29,8 @@ export interface UseItemInformationResult {
   refetch: () => Promise<void>;
   /** Function to refetch only a specific set of items */
   refetchItems: (itemIds: string[]) => Promise<void>;
+  /** Function to force refresh (clears cache and refetches) */
+  forceRefresh: () => void;
 }
 
 export const useItemInformation = (): UseItemInformationResult => {
@@ -46,6 +52,9 @@ export const useItemInformation = (): UseItemInformationResult => {
     try {
       let itemIds: string[] = [];
       let currentItemId: string | undefined;
+      let pageContext: unknown = null;
+      let localPathsToResolve: string[] = [];
+      let currentPagePath = '';
 
       if (specificItemIds && specificItemIds.length > 0) {
         itemIds = specificItemIds;
@@ -53,45 +62,41 @@ export const useItemInformation = (): UseItemInformationResult => {
         currentItemId = specificItemIds[0];
       } else {
         // Get current context to identify items
-        const { data: pageContext } = await client.query('pages.context');
-        console.log('Page context retrieved:', pageContext);
+        const { data: contextData } = await client.query('pages.context');
+        pageContext = contextData;
+        console.log('🔍 Page context retrieved for current page:', pageContext);
         
-        // Extract current item ID from page context
-        if (pageContext && typeof pageContext === 'object') {
-          const context = pageContext as Record<string, unknown>;
-          
-          // Try to find current item ID in pageInfo first
-          if (context.pageInfo && typeof context.pageInfo === 'object') {
-            const pageInfo = context.pageInfo as Record<string, unknown>;
-            currentItemId = pageInfo.itemId as string || 
-                           pageInfo.id as string ||
-                           pageInfo.pageId as string;
-          }
-          
-          // Fallback to other locations
-          if (!currentItemId) {
-            currentItemId = context.itemId as string || 
-                           context.id as string ||
-                           context.pageId as string;
-          }
-        }
+        // Log key identifiers to help debug page navigation issues
+        const context = pageContext as Record<string, unknown>;
+        const pageInfo = context?.pageInfo as Record<string, unknown>;
+        const currentPageId = pageInfo?.id as string;
+        const currentPageName = pageInfo?.name as string;
+        console.log('📄 Current page details:', {
+          id: currentPageId,
+          name: currentPageName, 
+          path: pageInfo?.path as string
+        });
         
-        // Extract item IDs from context
-        itemIds = extractItemIds(pageContext);
+        // Extract ALL items from context (current + editable items)
+        const extractionResult = extractItemIdsWithLocalPaths(pageContext);
+        itemIds = extractionResult.itemIds;
+        localPathsToResolve = extractionResult.localPathsToResolve;
+        currentPagePath = extractionResult.currentPagePath;
+        
+        console.log('All items from context:', itemIds);
+        console.log('Local paths to resolve:', localPathsToResolve);
+        console.log('Current page path:', currentPagePath);
         
         if (itemIds.length === 0) {
           throw new Error('No item IDs found in current context');
         }
         
-        // Make sure currentItemId is in the itemIds array
-        if (currentItemId && !itemIds.includes(currentItemId)) {
-          itemIds.unshift(currentItemId); // Add to beginning
-        } else if (!currentItemId && itemIds.length > 0) {
-          currentItemId = itemIds[0]; // Use first item as fallback
-        }
+        // The first item should be the current page item (extractItemIds puts it first)
+        currentItemId = itemIds[0];
+        console.log('Current item ID identified as:', currentItemId);
       }
 
-      console.log('Fetching information for items:', itemIds);
+      console.log('Fetching information for initial items:', itemIds);
       console.log('Current item ID identified as:', currentItemId);
 
       // Get application context to extract sitecoreContextId (official approach)
@@ -115,21 +120,50 @@ export const useItemInformation = (): UseItemInformationResult => {
         console.error('Failed to get application context:', error);
       }
 
-      // Query both endpoints in parallel for better performance
+      // Resolve local datasource paths to item IDs if needed
+      if (localPathsToResolve.length > 0 && sitecoreContextId) {
+        console.log('🔍 Resolving local datasource paths:', localPathsToResolve);
+        try {
+          const resolvedPaths = await resolveLocalDatasourcePaths(
+            client, 
+            localPathsToResolve, 
+            currentPagePath, 
+            sitecoreContextId
+          );
+          
+          // Add resolved item IDs to the list
+          Object.values(resolvedPaths).forEach(resolvedId => {
+            if (resolvedId && !itemIds.includes(resolvedId)) {
+              console.log(`✅ Adding resolved datasource item: ${resolvedId}`);
+              itemIds.push(resolvedId);
+            }
+          });
+          
+          console.log('📝 Updated item IDs after local path resolution:', itemIds);
+        } catch (error) {
+          console.error('❌ Error resolving local datasource paths:', error);
+        }
+      }
+
+      // Query all items (from context) for both authoring and live data
+      console.log('Querying authoring and live data for', itemIds.length, 'items...');
+      console.log('🔍 Checking for target item 9C8262E4-6456-4946-B04E-D5873874615E in final list:', 
+                  itemIds.includes('9C8262E4-6456-4946-B04E-D5873874615E') ? '✅ FOUND' : '❌ MISSING');
+      
       const [authoringResult, liveResult] = await Promise.all([
         getItemsFromAuthoring(client, itemIds, sitecoreContextId),
         getItemsFromLive(client, itemIds, sitecoreContextId)
       ]);
 
-      console.log('Authoring result:', authoringResult);
-      console.log('Live result:', liveResult);
+      console.log('Final authoring result for', itemIds.length, 'items:', authoringResult);
+      console.log('Final live result for', itemIds.length, 'items:', liveResult);
 
       // Process the data
       const processedItems = processItemData(
         authoringResult,
         liveResult,
         itemIds,
-        currentItemId // Use the correctly identified current item ID
+        currentItemId
       );
 
       // Create the complete response
@@ -139,8 +173,10 @@ export const useItemInformation = (): UseItemInformationResult => {
       setItems(processedItems);
 
       console.log('Processed item information:', {
-        response: itemInformationResponse,
-        items: processedItems
+        totalItems: itemIds.length,
+        currentItem: itemInformationResponse.currentItem,
+        referencedItems: itemInformationResponse.referencedItems.length,
+        summary: itemInformationResponse.summary
       });
 
     } catch (err) {
@@ -162,6 +198,16 @@ export const useItemInformation = (): UseItemInformationResult => {
     await fetchItemInformation();
   }, [fetchItemInformation]);
 
+  // Add a mechanism to force refresh when page changes
+  // This is important for when navigating between different pages in Sitecore
+  const forceRefresh = useCallback(() => {
+    console.log('🔄 Force refresh triggered - clearing cached data');
+    setData(null);
+    setItems([]);
+    setError(null);
+    fetchItemInformation();
+  }, [fetchItemInformation]);
+
   // Initial load
   useEffect(() => {
     if (isInitialized && !clientError) {
@@ -177,7 +223,8 @@ export const useItemInformation = (): UseItemInformationResult => {
     loading,
     error,
     refetch,
-    refetchItems
+    refetchItems,
+    forceRefresh
   };
 };
 
@@ -242,6 +289,11 @@ export const useSpecificItemsInformation = (itemIds: string[]): UseItemInformati
     await fetchSpecificItems();
   }, [fetchSpecificItems]);
 
+  const forceRefresh = useCallback(async () => {
+    console.log('Force refresh triggered');
+    await fetchSpecificItems();
+  }, [fetchSpecificItems]);
+
   useEffect(() => {
     if (isInitialized && !clientError && itemIds.length > 0) {
       fetchSpecificItems();
@@ -256,6 +308,7 @@ export const useSpecificItemsInformation = (itemIds: string[]): UseItemInformati
     loading,
     error,
     refetch,
-    refetchItems
+    refetchItems,
+    forceRefresh
   };
 };

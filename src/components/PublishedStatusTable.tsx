@@ -20,7 +20,8 @@ import {
   Spinner,
   Center,
   Flex,
-  Spacer
+  Spacer,
+  useToast
 } from '@chakra-ui/react';
 import { useItemInformation } from '../hooks/useItemInformation';
 import { 
@@ -28,6 +29,7 @@ import {
   PublishingStatusSummary, 
   ItemTypeBadge 
 } from './PublishingStatusIndicator';
+import { formatGuidWithHyphens } from '../utils/dataProcessing';
 
 export const PublishedStatusTable: React.FC = () => {
   const { 
@@ -37,6 +39,58 @@ export const PublishedStatusTable: React.FC = () => {
     error, 
     refetch 
   } = useItemInformation();
+
+  const toast = useToast();
+
+  const copyToClipboard = async (text: string, description: string = 'Item ID') => {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        // Use modern clipboard API
+        await navigator.clipboard.writeText(text);
+        toast({
+          title: `${description} Copied!`,
+          description: `${text} has been copied to clipboard`,
+          status: 'success',
+          duration: 2000,
+          isClosable: true,
+        });
+      } else {
+        // Fallback for older browsers or non-secure context
+        const textArea = document.createElement('textarea');
+        textArea.value = text;
+        textArea.style.position = 'fixed';
+        textArea.style.left = '-999999px';
+        textArea.style.top = '-999999px';
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        
+        const successful = document.execCommand('copy');
+        document.body.removeChild(textArea);
+        
+        if (successful) {
+          toast({
+            title: `${description} Copied!`,
+            description: `${text} has been copied to clipboard`,
+            status: 'success',
+            duration: 2000,
+            isClosable: true,
+          });
+        } else {
+          throw new Error('Fallback copy failed');
+        }
+      }
+    } catch (error) {
+      console.error('Failed to copy to clipboard:', error);
+      toast({
+        title: 'Copy Failed',
+        description: 'Unable to copy to clipboard. Please select and copy manually.',
+        status: 'error',
+        duration: 3000,
+        isClosable: true,
+      });
+    }
+  };
 
   if (loading) {
     return (
@@ -125,8 +179,21 @@ export const PublishedStatusTable: React.FC = () => {
                   <VStack align="start" spacing={1}>
                     <Text fontWeight="bold">{data.currentItem.name}</Text>
                     <Text fontSize="sm" color="gray.500">
-                      {data.currentItem.path || data.currentItem.id}
+                      {data.currentItem.path}
                     </Text>
+                    <HStack spacing={2} align="center">
+                      <Text fontSize="xs" fontFamily="mono" color="blue.600">
+                        ID: {formatGuidWithHyphens(data.currentItem.id)}
+                      </Text>
+                      <Button 
+                        size="xs" 
+                        variant="ghost" 
+                        onClick={() => copyToClipboard(formatGuidWithHyphens(data.currentItem.id), 'Item ID')}
+                        title="Copy Item ID"
+                      >
+                        📋
+                      </Button>
+                    </HStack>
                     {data.currentItem.template && (
                       <Text fontSize="xs" color="gray.400">
                         Template: {data.currentItem.template}
@@ -151,7 +218,7 @@ export const PublishedStatusTable: React.FC = () => {
                 <Td>
                   <PublishingStatusIndicator 
                     item={data.currentItem} 
-                    showDetails={true}
+                    showDetails={false}
                   />
                 </Td>
               </Tr>
@@ -166,15 +233,14 @@ export const PublishedStatusTable: React.FC = () => {
           <Heading size="md" mb={4}>
             Referenced Items ({data.referencedItems.length})
           </Heading>
-          <Table variant="simple" size="sm">
+          <Table variant="simple" size="md">
             <Thead>
               <Tr>
                 <Th>Item Information</Th>
                 <Th>Type</Th>
-                <Th>Latest</Th>
-                <Th>Published</Th>
-                <Th>Status</Th>
-                <Th>Actions</Th>
+                <Th>Latest Version</Th>
+                <Th>Published Version</Th>
+                <Th>Publishing Status</Th>
               </Tr>
             </Thead>
             <Tbody>
@@ -186,59 +252,46 @@ export const PublishedStatusTable: React.FC = () => {
                         {item.name}
                       </Text>
                       <Text fontSize="xs" color="gray.500">
-                        {item.path || item.id}
+                        {item.path}
                       </Text>
+                      <HStack spacing={2} align="center">
+                        <Text fontSize="xs" fontFamily="mono" color="blue.600">
+                          ID: {formatGuidWithHyphens(item.id)}
+                        </Text>
+                        <Button 
+                          size="xs" 
+                          variant="ghost" 
+                          onClick={() => copyToClipboard(formatGuidWithHyphens(item.id), 'Item ID')}
+                          title="Copy Item ID"
+                        >
+                          📋
+                        </Button>
+                      </HStack>
                       {item.template && (
                         <Text fontSize="xs" color="gray.400">
-                          {item.template}
+                          Template: {item.template}
                         </Text>
                       )}
                     </VStack>
                   </Td>
                   <Td>
-                    <ItemTypeBadge itemType={item.itemType} size="sm" />
+                    <ItemTypeBadge itemType={item.itemType} />
                   </Td>
                   <Td>
-                    <Text fontSize="sm" fontWeight="medium">
+                    <Text fontWeight="semibold">
                       v{item.latestVersion}
                     </Text>
                   </Td>
                   <Td>
-                    <Text fontSize="sm">
+                    <Text>
                       {item.publishedVersion 
                         ? `v${item.publishedVersion}`
-                        : '-'
+                        : 'Not Published'
                       }
                     </Text>
                   </Td>
                   <Td>
-                    <PublishingStatusIndicator item={item} size="sm" />
-                  </Td>
-                  <Td>
-                    <HStack spacing={2}>
-                      <Button 
-                        size="xs" 
-                        variant="outline"
-                        onClick={() => {
-                          // TODO: Implement view details functionality
-                          console.log('View details for item:', item.id);
-                        }}
-                      >
-                        Details
-                      </Button>
-                      {item.isOutdated && (
-                        <Button 
-                          size="xs" 
-                          colorScheme="orange"
-                          onClick={() => {
-                            // TODO: Implement publish functionality
-                            console.log('Publish item:', item.id);
-                          }}
-                        >
-                          Publish
-                        </Button>
-                      )}
-                    </HStack>
+                    <PublishingStatusIndicator item={item} showDetails={false} />
                   </Td>
                 </Tr>
               ))}

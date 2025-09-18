@@ -10,26 +10,210 @@ import type {
 } from '../types/itemInformation';
 
 /**
- * Extract item IDs from pages context
- * This function should extract the current page item ID and any related items
+ * Normalize item ID to uppercase without braces or hyphens (for internal use)
+ */
+const normalizeItemId = (itemId: string): string => {
+  return itemId.replace(/[{}-]/g, '').toUpperCase();
+};
+
+/**
+ * Format GUID with hyphens for display purposes (standard GUID format)
+ */
+export const formatGuidWithHyphens = (guid: string): string => {
+  const clean = guid.replace(/[{}-]/g, '').toUpperCase();
+  if (clean.length !== 32) return guid; // Return original if not a valid GUID
+  
+  return `${clean.substring(0, 8)}-${clean.substring(8, 12)}-${clean.substring(12, 16)}-${clean.substring(16, 20)}-${clean.substring(20, 32)}`;
+};
+
+/**
+ * Format GUID without hyphens (compact format)
+ */
+export const formatGuidWithoutHyphens = (guid: string): string => {
+  return guid.replace(/[{}-]/g, '').toUpperCase();
+};
+
+/**
+ * Check if a string is a valid GUID format
+ */
+const isValidGuid = (str: string): boolean => {
+  const guidRegex = /^[{]?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}[}]?$/;
+  return guidRegex.test(str);
+};
+
+/**
+ * Parse datasource value and extract item IDs and local paths
+ * Returns object with directIds (GUIDs) and localPaths (need resolution)
+ */
+const parseDatasourceValue = (datasource: string): { directIds: string[], localPaths: string[] } => {
+  const directIds: string[] = [];
+  const localPaths: string[] = [];
+  
+  if (!datasource || typeof datasource !== 'string') {
+    return { directIds, localPaths };
+  }
+  
+  console.log(`🔍 Parsing datasource value: "${datasource}"`);
+  
+  // Handle multiple datasources separated by pipes
+  const datasources = datasource.split('|').map(ds => ds.trim()).filter(ds => ds.length > 0);
+  
+  for (const ds of datasources) {
+    if (isValidGuid(ds)) {
+      // Direct GUID reference
+      const cleanId = normalizeItemId(ds);
+      directIds.push(cleanId);
+      console.log(`  ✓ Found GUID datasource: ${cleanId}`);
+    } else if (ds.startsWith('local:/')) {
+      // Local datasource path - needs to be resolved via GraphQL
+      const localPath = ds.substring(7); // Remove 'local:/'
+      localPaths.push(localPath);
+      console.log(`  🎯 Found local datasource path: "${localPath}" - needs resolution`);
+    } else if (ds.startsWith('/sitecore/')) {
+      // Sitecore content path - needs to be resolved via GraphQL
+      localPaths.push(ds); // Store full path for resolution
+      console.log(`  🎯 Found content path datasource: "${ds}" - needs resolution`);
+    } else if (ds.startsWith('query:')) {
+      // Query-based datasource - complex resolution needed
+      console.log(`  🎯 Found query datasource: "${ds}" - complex resolution needed`);
+      // TODO: Handle query-based datasources
+    } else if (ds.length > 0) {
+      // Unknown format - log for debugging
+      console.log(`  ⚠️ Unknown datasource format: "${ds}"`);
+    }
+  }
+  
+  return { directIds, localPaths };
+};
+
+/**
+ * Extract all datasource item IDs from presentation details structure
+ * Returns both direct GUID references and local paths that need resolution
+ */
+const extractDatasourcesFromPresentationDetails = (presentationDetails: unknown): { directIds: string[], localPaths: string[] } => {
+  const directIds: string[] = [];
+  const localPaths: string[] = [];
+  
+  if (!presentationDetails) {
+    return { directIds, localPaths };
+  }
+  
+  try {
+    // Parse the presentation details (could be string or object)
+    let details: Record<string, unknown>;
+    if (typeof presentationDetails === 'string') {
+      details = JSON.parse(presentationDetails) as Record<string, unknown>;
+    } else {
+      details = presentationDetails as Record<string, unknown>;
+    }
+    
+    // Navigate the presentation structure to find renderings and their datasources
+    if (details.devices && Array.isArray(details.devices)) {
+      for (const device of details.devices) {
+        if (device.renderings && Array.isArray(device.renderings)) {
+          for (const rendering of device.renderings) {
+            if (rendering.dataSource || rendering.datasource) {
+              const datasourceValue = rendering.dataSource || rendering.datasource;
+              console.log(`📄 Found rendering datasource: "${datasourceValue}"`);
+              
+              const { directIds: renderingDirectIds, localPaths: renderingLocalPaths } = parseDatasourceValue(datasourceValue);
+              
+              // Collect direct IDs
+              renderingDirectIds.forEach(id => {
+                if (!directIds.includes(id)) {
+                  directIds.push(id);
+                }
+              });
+              
+              // Collect local paths
+              renderingLocalPaths.forEach(path => {
+                if (!localPaths.includes(path)) {
+                  localPaths.push(path);
+                }
+              });
+            }
+          }
+        }
+        
+        // Also check placeholders for nested datasources
+        if (device.placeholders && Array.isArray(device.placeholders)) {
+          for (const placeholder of device.placeholders) {
+            // Recursively process placeholder renderings
+            if (placeholder.renderings && Array.isArray(placeholder.renderings)) {
+              for (const rendering of placeholder.renderings) {
+                if (rendering.dataSource || rendering.datasource) {
+                  const datasourceValue = rendering.dataSource || rendering.datasource;
+                  console.log(`📄 Found placeholder rendering datasource: "${datasourceValue}"`);
+                  
+                  const { directIds: placeholderDirectIds, localPaths: placeholderLocalPaths } = parseDatasourceValue(datasourceValue);
+                  
+                  // Collect direct IDs
+                  placeholderDirectIds.forEach(id => {
+                    if (!directIds.includes(id)) {
+                      directIds.push(id);
+                    }
+                  });
+                  
+                  // Collect local paths
+                  placeholderLocalPaths.forEach(path => {
+                    if (!localPaths.includes(path)) {
+                      localPaths.push(path);
+                    }
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.warn('Error parsing presentation details:', error);
+  }
+  
+  console.log(`📋 Extracted ${directIds.length} direct datasource IDs and ${localPaths.length} local paths from presentation details`);
+  return { directIds, localPaths };
+};
+
+/**
+ * Interface for enhanced item extraction results
+ */
+export interface ExtractedItemInfo {
+  itemIds: string[];
+  localPathsToResolve: string[];
+  currentPagePath: string;
+}
+
+/**
+ * Extract item IDs from pages context including datasources from presentation details
  */
 export const extractItemIds = (pageContext: unknown): string[] => {
+  const result = extractItemIdsWithLocalPaths(pageContext);
+  return result.itemIds;
+}
+
+/**
+ * Enhanced version that returns more detailed information for local path resolution
+ */
+export const extractItemIdsWithLocalPaths = (pageContext: unknown): ExtractedItemInfo => {
   console.log('Pages context:', pageContext);
   
   if (!pageContext || typeof pageContext !== 'object') {
     console.warn('Invalid page context provided');
-    return [];
+    return { itemIds: [], localPathsToResolve: [], currentPagePath: '' };
   }
 
   const context = pageContext as Record<string, unknown>;
   const itemIds: string[] = [];
-
-  // Try to extract current page item ID from different possible locations
-  let currentItemId: string | undefined;
+  let currentItemId: string | null = null;
+  let currentPagePath = '';
 
   // Check pageInfo for current item
   if (context.pageInfo && typeof context.pageInfo === 'object') {
     const pageInfo = context.pageInfo as Record<string, unknown>;
+    
+    // Extract current page path
+    currentPagePath = (pageInfo.path as string) || '';
     
     // Common locations for current item ID
     currentItemId = pageInfo.itemId as string || 
@@ -37,6 +221,39 @@ export const extractItemIds = (pageContext: unknown): string[] => {
                    pageInfo.pageId as string;
     
     console.log('Found current item ID from pageInfo:', currentItemId);
+    
+    // Extract datasources from presentation details
+    if (pageInfo.presentationDetails) {
+      console.log('🔍 Extracting datasources from presentation details...');
+      const { directIds, localPaths } = extractDatasourcesFromPresentationDetails(pageInfo.presentationDetails);
+      
+      // Add direct GUID datasources
+      directIds.forEach(id => {
+        if (!itemIds.includes(id)) {
+          console.log(`📝 Found direct datasource item: ${id}`);
+          itemIds.push(id);
+        }
+      });
+      
+      // Return info about local paths that need resolution
+      if (localPaths.length > 0) {
+        console.log(`🔍 Found ${localPaths.length} local paths to resolve:`, localPaths);
+        
+        // Add main item first
+        if (currentItemId && typeof currentItemId === 'string') {
+          const cleanCurrentId = normalizeItemId(currentItemId);
+          if (!itemIds.includes(cleanCurrentId)) {
+            itemIds.unshift(cleanCurrentId);
+          }
+        }
+        
+        return { 
+          itemIds, 
+          localPathsToResolve: localPaths, 
+          currentPagePath 
+        };
+      }
+    }
   }
 
   // Check siteInfo for current item (fallback)
@@ -54,20 +271,19 @@ export const extractItemIds = (pageContext: unknown): string[] => {
     console.log('Found current item ID from root context:', currentItemId);
   }
 
-  // Add current item ID if found
+  // Add current item ID if found (ensure it's first in the list)
   if (currentItemId && typeof currentItemId === 'string') {
-    itemIds.push(currentItemId);
+    const cleanCurrentId = normalizeItemId(currentItemId);
+    if (!itemIds.includes(cleanCurrentId)) {
+      itemIds.unshift(cleanCurrentId); // Add at beginning
+    }
   } else {
     console.warn('Could not extract current item ID from page context');
-    // Return empty array instead of mock data when we can't find the actual item
-    return [];
+    return { itemIds: [], localPathsToResolve: [], currentPagePath: '' };
   }
 
-  // TODO: Extract related items (datasources, references, etc.) from the context
-  // For now, we'll just return the current item
-  
   console.log('Extracted item IDs:', itemIds);
-  return itemIds;
+  return { itemIds, localPathsToResolve: [], currentPagePath };
 };
 
 /**

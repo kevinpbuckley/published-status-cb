@@ -1,10 +1,18 @@
 // utils/graphqlQueries.ts
 import { ClientSDK } from '@sitecore-marketplace-sdk/client';
 import type { ItemQueryResult } from '../types/itemInformation';
+import { formatGuidWithHyphens } from './dataProcessing';
 
 // Configuration for direct live endpoint calls
 const LIVE_ENDPOINT = 'https://edge.sitecorecloud.io/api/graphql/v1';
 const LIVE_TOKEN = 'YWZGOHA4NmhnRXZZNVJhWmttQ1FMbWd2em5QejlIU1IzSjJxejZ4SWlrdz18cHJvZmVzc2lvbmFhZDQ3LXBzc2hhcmVkMjNkYi1wc3NoYXJlZGRldmFkNjgtNjUyZQ==';
+
+/**
+ * Format GUID for live endpoint (needs hyphens)
+ */
+export const formatGuidForLive = (guid: string): string => {
+  return formatGuidWithHyphens(guid);
+};
 
 /**
  * Query the authoring endpoint for multiple items to get latest versions
@@ -93,6 +101,7 @@ export const getItemsFromAuthoring = async (
 export const getItemsFromLive = async (
   _client: ClientSDK, // Unused but kept for API compatibility
   itemIds: string[],
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _sitecoreContextId?: string // Unused but kept for API compatibility
 ): Promise<ItemQueryResult> => {
   if (itemIds.length === 0) {
@@ -102,7 +111,7 @@ export const getItemsFromLive = async (
   const query = `
     query GetLiveItems {
       ${itemIds.map((id, index) => `
-        item${index}: item(path: "{${id}}", language: "en") {
+        item${index}: item(path: "{${formatGuidForLive(id)}}", language: "en") {
           id
           name
           version
@@ -239,4 +248,93 @@ export const validateGraphQLResponse = (response: ItemQueryResult): {
     isValid: errors.length === 0,
     errors
   };
+};
+
+/**
+ * Resolve local datasource paths to item IDs using GraphQL
+ * @param client - Marketplace SDK client
+ * @param localPaths - Array of local paths like ['Data/Article Header', 'Data/Text 1']
+ * @param basePath - Base path of the current page (e.g., '/sitecore/content/.../Article Page')
+ * @param sitecoreContextId - Context ID for the query
+ * @returns Object mapping local paths to resolved item IDs
+ */
+export const resolveLocalDatasourcePaths = async (
+  client: ClientSDK,
+  localPaths: string[],
+  basePath: string,
+  sitecoreContextId: string
+): Promise<Record<string, string | null>> => {
+  if (!client || localPaths.length === 0) {
+    return {};
+  }
+
+  // Construct full paths by combining base path with local paths
+  const fullPaths = localPaths.map(localPath => {
+    const cleanPath = localPath.replace('Data/', '');
+    return `${basePath}/Data/${cleanPath}`;
+  });
+
+  const query = `
+    query ResolveLocalDatasources {
+      ${localPaths.map((_, index) => `
+        path${index}: item(where: {
+          database: "master"
+          path: "${fullPaths[index]}"
+          language: "en"
+        }) {
+          itemId
+          name
+          path
+        }
+      `).join('')}
+    }
+  `;
+
+  try {
+    console.log('🔍 Resolving local datasource paths via GraphQL:', localPaths);
+    console.log('📍 Full paths to query:', fullPaths);
+    console.log('🔎 GraphQL query:', query.trim());
+
+    const response = await client.mutate('xmc.authoring.graphql', {
+      params: {
+        query: {
+          sitecoreContextId
+        },
+        body: {
+          query: query.trim()
+        }
+      }
+    });
+
+    console.log('✅ Local path resolution GraphQL result:', response);
+
+    const result: Record<string, string | null> = {};
+    
+    if (response?.data?.data) {
+      localPaths.forEach((localPath, index) => {
+        const responseData = response.data?.data;
+        if (responseData) {
+          const item = responseData[`path${index}`] as { itemId?: string; name?: string } | null;
+          if (item && item.itemId) {
+            result[localPath] = item.itemId.replace(/[{}]/g, '').toUpperCase();
+            console.log(`📝 Resolved ${localPath} → ${result[localPath]} (${item.name || 'Unknown'})`);
+          } else {
+            result[localPath] = null;
+            console.log(`❌ Could not resolve ${localPath} at path ${fullPaths[index]}`);
+          }
+        }
+      });
+    }
+
+    return result;
+
+  } catch (error) {
+    console.error('❌ Error resolving local datasource paths:', error);
+    // Return empty results for failed resolution
+    const result: Record<string, string | null> = {};
+    localPaths.forEach((path: string) => {
+      result[path] = null;
+    });
+    return result;
+  }
 };
